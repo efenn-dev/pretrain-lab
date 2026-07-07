@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pretrain-lab</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0e1013; --card: #161a20; --border: #242a33; --text: #e8eaed;
+    --muted: #8b94a1; --accent: #8b7cf6; --good: #34d399; --warn: #fbbf24; --bad: #f87171;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 15px/1.5 "Segoe UI", system-ui, sans-serif; padding: 24px; max-width: 1100px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+  h1 { font-size: 20px; font-weight: 600; }
+  h1 span { color: var(--accent); }
+  .live { font-size: 12px; color: var(--muted); }
+  .live b { color: var(--good); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card h3 { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
+  .big { font-size: 24px; font-weight: 600; }
+  .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .bar { height: 6px; background: var(--border); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; transition: width .5s; }
+  .wide { margin-bottom: 16px; }
+  canvas { max-height: 320px; }
+  .road { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+  .road li { display: flex; gap: 10px; align-items: baseline; }
+  .chip { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; white-space: nowrap; text-transform: uppercase; letter-spacing: .04em; }
+  .chip.running { background: #2b2160; color: #c4b5fd; }
+  .chip.done { background: #113328; color: var(--good); }
+  .chip.ready { background: #3a2e10; color: var(--warn); }
+  .chip.queued, .chip.planned { background: #21262e; color: var(--muted); }
+  .road .detail { color: var(--muted); font-size: 13px; }
+  .notes-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; max-height: 260px; overflow-y: auto; }
+  .note { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 14px; }
+  .note .meta { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  textarea { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font: inherit; resize: vertical; min-height: 60px; }
+  button { margin-top: 8px; background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 8px 18px; font: inherit; font-weight: 600; cursor: pointer; }
+  button:hover { filter: brightness(1.1); }
+  footer { margin-top: 20px; font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>pretrain<span>-lab</span> — AGI training dashboard</h1>
+  <div class="live">last update <b id="now">—</b></div>
+</header>
+
+<div class="grid">
+  <div class="card"><h3>Run</h3><div class="big" id="run-name">—</div><div class="sub" id="run-state">—</div></div>
+  <div class="card"><h3>Progress</h3><div class="big" id="iter">—</div><div class="sub" id="eta">—</div><div class="bar"><i id="bar" style="width:0%"></i></div></div>
+  <div class="card"><h3>Loss</h3><div class="big" id="loss">—</div><div class="sub" id="val-loss">val: —</div></div>
+  <div class="card"><h3>GPU</h3><div class="big" id="gpu-util">—</div><div class="sub" id="gpu-mem">—</div></div>
+</div>
+
+<div class="card wide"><h3>Loss curve — lower is better (random start ≈ 11.0, GPT-2 quality ≈ 3.3)</h3><canvas id="chart"></canvas></div>
+
+<div class="card wide"><h3>Roadmap — the frontier recipe, our scale</h3><ul class="road" id="road"></ul></div>
+
+<div class="card wide">
+  <h3>Shared notes — visible to Erik and Claude sessions</h3>
+  <div class="notes-list" id="notes"></div>
+  <textarea id="note-text" placeholder="Leave a note, idea, or instruction for the next session..."></textarea><br>
+  <button onclick="sendNote()">Save note</button>
+</div>
+
+<footer>pretrain-lab · C:\projects\pretrain-lab · logs in logs/ · checkpoints in runs/ · refreshes every 5s</footer>
+
+<script>
+const chart = new Chart(document.getElementById('chart'), {
+  type: 'line',
+  data: { datasets: [
+    { label: 'train loss', data: [], borderColor: '#8b7cf6', backgroundColor: '#8b7cf6', pointRadius: 0, borderWidth: 1.5, tension: .2 },
+    { label: 'val loss', data: [], borderColor: '#34d399', backgroundColor: '#34d399', pointRadius: 3, showLine: false },
+  ]},
+  options: {
+    animation: false, parsing: false, responsive: true,
+    scales: {
+      x: { type: 'linear', title: { display: true, text: 'iteration', color: '#8b94a1' }, ticks: { color: '#8b94a1' }, grid: { color: '#242a33' } },
+      y: { title: { display: true, text: 'loss', color: '#8b94a1' }, ticks: { color: '#8b94a1' }, grid: { color: '#242a33' } },
+    },
+    plugins: { legend: { labels: { color: '#e8eaed' } } },
+  },
+});
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+async function refresh() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    const run = s.runs[0];
+    document.getElementById('now').textContent = s.now;
+    document.getElementById('run-name').textContent = run.name;
+    document.getElementById('run-state').textContent = run.done ? 'finished ✓' :
+      (run.losses.length ? run.label : (s.prep.state === 'running' ? `preparing data (${s.prep.tokens_m}M/2000M tokens)` : 'waiting'));
+    document.getElementById('iter').textContent = `${run.last_iter} / ${run.target_iters}`;
+    document.getElementById('bar').style.width = (100 * run.last_iter / run.target_iters) + '%';
+    document.getElementById('eta').textContent = run.done ? `done — best val ${run.best_val}` :
+      (run.eta_min ? `~${Math.floor(run.eta_min / 60)}h ${run.eta_min % 60}m left · ${(run.tps/1000).toFixed(0)}K tok/s` : '—');
+    const lastLoss = run.losses.length ? run.losses[run.losses.length - 1][1] : null;
+    document.getElementById('loss').textContent = lastLoss ? lastLoss.toFixed(3) : '—';
+    document.getElementById('val-loss').textContent = 'val: ' + (run.latest_val ? run.latest_val.toFixed(3) : '—');
+    if (s.gpu) {
+      document.getElementById('gpu-util').textContent = s.gpu.util + '%';
+      document.getElementById('gpu-mem').textContent = `${(s.gpu.vram_used/1024).toFixed(1)} / ${(s.gpu.vram_total/1024).toFixed(1)} GB · ${s.gpu.temp}°C`;
+    }
+    chart.data.datasets[0].data = run.losses.map(p => ({ x: p[0], y: p[1] }));
+    chart.data.datasets[1].data = run.evals.map(p => ({ x: p[0], y: p[2] }));
+    chart.update();
+    document.getElementById('road').innerHTML = s.roadmap.map(r =>
+      `<li><span class="chip ${r.status}">${r.status}</span><span>${esc(r.label)}<br><span class="detail">${esc(r.detail)}</span></span></li>`).join('');
+    document.getElementById('notes').innerHTML = s.notes.length ? s.notes.slice().reverse().map(n =>
+      `<div class="note"><div class="meta">${esc(n.author)} · ${esc(n.ts)}</div>${esc(n.text)}</div>`).join('')
+      : '<div class="note"><div class="meta">no notes yet</div>Leave the first one below.</div>';
+  } catch (e) { document.getElementById('now').textContent = 'server unreachable'; }
+}
+
+async function sendNote() {
+  const el = document.getElementById('note-text');
+  if (!el.value.trim()) return;
+  await fetch('/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ author: 'Erik', text: el.value.trim() }) });
+  el.value = '';
+  refresh();
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

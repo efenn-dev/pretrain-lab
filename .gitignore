@@ -1,0 +1,7 @@
+# datasets, checkpoints, logs — GB-scale, regenerable
+data/
+runs/
+logs/
+__pycache__/
+# live cross-session state (lives on disk, not in history)
+dashboard_notes.json
