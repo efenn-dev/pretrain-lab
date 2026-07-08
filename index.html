@@ -122,7 +122,7 @@ async function sendNote() {
   const el = document.getElementById('note-text');
   if (!el.value.trim()) return;
   await fetch('/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ author: 'Emmitt', text: el.value.trim() }) });
+    body: JSON.stringify({ author: localStorage.getItem('notesAuthor') || 'human', text: el.value.trim() }) });
   el.value = '';
   refresh();
 }

@@ -1,8 +1,40 @@
 # pretrain-lab
 
-Train GPT-family language models **from scratch** on the local RTX 5070 Ti (16 GB).
-Same architecture family as GPT-2/3 — the only difference between this and a
-frontier lab is scale (parameters, tokens, GPUs).
+Train GPT-family language models **from scratch** on a single consumer GPU
+(built and measured on an RTX 5070 Ti, 16 GB). Same architecture family as
+GPT-2/3 — the only difference between this and a frontier lab is scale
+(parameters, tokens, GPUs). The full three-stage frontier recipe — pretraining,
+instruction tuning, and RL on verifiable rewards — runs end to end here, in
+plain readable code (the from-scratch lane has zero dependencies beyond
+PyTorch + numpy + tiktoken).
+
+## Measured results (one day, one GPU)
+
+**124M pretrained from scratch** on 2.5B FineWeb-Edu tokens (~10.5 h):
+val loss 3.219, HellaSwag acc_norm **32.5%** — above the original GPT-2 124M
+(~29–31%; random = 25%). Same architecture and size; the difference is a
+decade of better training data.
+
+**Five-run RLVR study** (124M, synthetic exactly-verifiable tasks,
+strict exact-match eval throughout):
+
+| Category | SFT | RL (binary) | Seeded SFT | Seed+RL (binary) | Seed+RL (shaped) |
+|---|---|---|---|---|---|
+| Add | 0% | 0% | 0% | 0% | **7.8%** |
+| Subtract | 0% | 0% | 7.9% | 0% | **15.8%** |
+| Count letter | 0% | 0% | 52.0% | **72.0%** | 56.0% |
+| Compare y/n | 10.5% | 50.0% | 100% | 100% | 84.2% |
+| **Overall** | **1.6%** | **11.7%** | **50.0%** | **49.2%** | **50.8%** |
+
+Findings, each earned the hard way:
+1. RL alone teaches *form*, not *function* — the unseeded RL column is pure format compliance.
+2. One 7-minute SFT pass installed more capability than any amount of RL could (+48 points).
+3. Binary rewards only sharpen what circuits already support (counting jumped; exact arithmetic destabilized).
+4. Reward density gates what RL can reach: partial credit for near misses was the *only* method that moved addition off 0%.
+5. Architecture is the final ceiling — no reward schedule makes a 124M compute exact multi-digit sums.
+
+**Industrial lane:** the same GRPO recipe on Qwen3.5-4B (TRL 1.7 + QLoRA,
+`grpo_qwen.py`) against GSM8K — zero-shot baseline 86.0%, RL run in progress.
 
 ## Quick start (verified working)
 
