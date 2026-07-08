@@ -73,7 +73,7 @@ def main() -> None:
         max_steps=args.max_steps,
         beta=args.beta,
         logging_steps=1,
-        save_steps=50,
+        save_steps=25,  # 50 left a 14h run with zero checkpoints at step 31 — never again
         save_total_limit=2,
         bf16=True,
         gradient_checkpointing=True,
