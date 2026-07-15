@@ -121,6 +121,81 @@ class ModernBlock(nn.Module):
         return x
 
 
+class _PurePyTorchMamba(nn.Module):
+    """Self-contained Mamba mixer in pure PyTorch (no CUDA kernel) — the
+    portable fallback when mamba_ssm's compiled selective_scan is unavailable
+    or ABI-mismatched (bleeding-edge torch, or no Linux+CUDA). Faithful to the
+    reference (Gu & Dao 2023, `mamba-minimal` structure): input projection ->
+    depthwise causal conv -> input-dependent (delta,B,C) -> sequential
+    selective scan -> gated output projection. Slower than the fused kernel
+    (the scan is a python loop over the sequence) but correct and runs
+    anywhere, including CPU. Same ~6*d^2 param budget as the fused version."""
+
+    def __init__(self, d_model: int, d_state: int = 16, d_conv: int = 4, expand: int = 2) -> None:
+        super().__init__()
+        self.d_inner = expand * d_model
+        self.d_state = d_state
+        self.dt_rank = math.ceil(d_model / 16)
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
+        self.conv1d = nn.Conv1d(self.d_inner, self.d_inner, kernel_size=d_conv,
+                                groups=self.d_inner, padding=d_conv - 1, bias=True)
+        self.x_proj = nn.Linear(self.d_inner, self.dt_rank + d_state * 2, bias=False)
+        self.dt_proj = nn.Linear(self.dt_rank, self.d_inner, bias=True)
+        A = torch.arange(1, d_state + 1, dtype=torch.float32).repeat(self.d_inner, 1)
+        self.A_log = nn.Parameter(torch.log(A))
+        self.D = nn.Parameter(torch.ones(self.d_inner))
+        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, l, _ = x.shape
+        xz = self.in_proj(x)
+        xin, res = xz.split([self.d_inner, self.d_inner], dim=-1)
+        xin = self.conv1d(xin.transpose(1, 2))[:, :, :l].transpose(1, 2)
+        xin = F.silu(xin)
+        # input-dependent SSM params
+        A = -torch.exp(self.A_log.float())                       # (d_inner, n)
+        x_dbl = self.x_proj(xin)
+        delta, B, C = x_dbl.split([self.dt_rank, self.d_state, self.d_state], dim=-1)
+        delta = F.softplus(self.dt_proj(delta))                  # (b, l, d_inner)
+        dA = torch.exp(delta.unsqueeze(-1) * A)                  # (b, l, d_inner, n)
+        dBx = delta.unsqueeze(-1) * B.unsqueeze(2) * xin.unsqueeze(-1)
+        h = torch.zeros(b, self.d_inner, self.d_state, device=x.device, dtype=dA.dtype)
+        ys = []
+        for i in range(l):                                       # sequential selective scan
+            h = dA[:, i] * h + dBx[:, i]
+            ys.append(torch.einsum("bdn,bn->bd", h, C[:, i]))
+        y = torch.stack(ys, dim=1) + xin * self.D               # (b, l, d_inner)
+        return self.out_proj(y * F.silu(res))
+
+
+class MambaBlock(nn.Module):
+    """State-space (Mamba) sequence mixer — a no-attention, linear-time block
+    for the Phase-1G SSM-vs-transformer experiment (llm-router
+    docs/PLAN-phase1g-resume.md). Prefers the fused mamba_ssm.Mamba kernel when
+    it imports cleanly; otherwise falls back to _PurePyTorchMamba (portable, no
+    CUDA kernel — so this arch runs even where the kernel won't build/load,
+    e.g. torch 2.8 ABI mismatches, or Windows/CPU). Pre-norm residual, same
+    (x, rope) signature as the other blocks; rope is ignored — the SSM
+    recurrence is inherently order-aware, so no positional embedding is needed.
+    The chosen impl is recorded on `.impl` for the run to log."""
+
+    def __init__(self, cfg: GPTConfig) -> None:
+        super().__init__()
+        self.norm = nn.RMSNorm(cfg.n_embd)
+        try:
+            from mamba_ssm import Mamba  # fused kernel (Linux+CUDA, matching torch)
+            self.mixer: nn.Module = Mamba(d_model=cfg.n_embd, d_state=16, d_conv=4, expand=2)
+            self.impl = "mamba_ssm(fused)"
+        except Exception:  # noqa: BLE001 — ImportError, undefined-symbol, or no CUDA
+            self.mixer = _PurePyTorchMamba(cfg.n_embd, d_state=16, d_conv=4, expand=2)
+            self.impl = "pure_pytorch(unfused)"
+
+    def forward(
+        self, x: torch.Tensor, rope: tuple[torch.Tensor, torch.Tensor] | None = None
+    ) -> torch.Tensor:
+        return x + self.mixer(self.norm(x))
+
+
 class GPT(nn.Module):
     """Decoder-only transformer language model (GPT-2 family shape)."""
 
@@ -139,6 +214,10 @@ class GPT(nn.Module):
             self.register_buffer("rope_sin", emb.sin(), persistent=False)
             self.blocks = nn.ModuleList(ModernBlock(cfg) for _ in range(cfg.n_layer))
             self.ln_f: nn.Module = nn.RMSNorm(cfg.n_embd)
+        elif cfg.arch == "mamba":
+            self.wpe = None                       # SSM recurrence is order-aware
+            self.blocks = nn.ModuleList(MambaBlock(cfg) for _ in range(cfg.n_layer))
+            self.ln_f = nn.RMSNorm(cfg.n_embd)
         else:
             self.wpe = nn.Embedding(cfg.block_size, cfg.n_embd)
             self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layer))
@@ -176,7 +255,7 @@ class GPT(nn.Module):
         if self.wpe is not None:
             pos = torch.arange(T, device=idx.device)
             x = x + self.wpe(pos)
-        else:
+        elif hasattr(self, "rope_cos"):           # modern; mamba has neither
             rope = (self.rope_cos[:T], self.rope_sin[:T])
         x = self.drop(x)
         for block in self.blocks:
@@ -269,8 +348,11 @@ def main() -> None:
     parser.add_argument("--data", type=Path, required=True, help=".txt file or dir with train.bin/val.bin")
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--preset", choices=PRESETS, default="nano")
-    parser.add_argument("--arch", choices=["gpt2", "modern"], default="gpt2",
-                        help="modern = RoPE + RMSNorm + SwiGLU (train ~same cost, better loss)")
+    parser.add_argument("--arch", choices=["gpt2", "modern", "mamba"], default="gpt2",
+                        help="modern = RoPE + RMSNorm + SwiGLU; mamba = state-space "
+                             "(no attention, needs mamba-ssm on Linux+CUDA — RunPod)")
+    parser.add_argument("--n-layer", type=int, default=None, help="override preset n_layer (param-match arches)")
+    parser.add_argument("--n-embd", type=int, default=None, help="override preset n_embd")
     parser.add_argument("--device", default=None, help="cuda / cpu (default: auto)")
     parser.add_argument("--block-size", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -294,9 +376,16 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     train_data, val_data, vocab_size = load_data(args.data, args.out_dir)
+    shape = dict(PRESETS[args.preset])
+    # optional shape overrides — used to param-MATCH arches (a Mamba block is
+    # ~half a transformer block's params, so the SSM comparison bumps --n-layer)
+    if args.n_layer is not None:
+        shape["n_layer"] = args.n_layer
+    if args.n_embd is not None:
+        shape["n_embd"] = args.n_embd
     cfg = GPTConfig(
         block_size=args.block_size, vocab_size=vocab_size,
-        dropout=args.dropout, arch=args.arch, **PRESETS[args.preset],
+        dropout=args.dropout, arch=args.arch, **shape,
     )
     model = GPT(cfg).to(device)
     if args.compile:

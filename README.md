@@ -36,6 +36,42 @@ Findings, each earned the hard way:
 **Industrial lane:** the same GRPO recipe on Qwen3.5-4B (TRL 1.7 + QLoRA,
 `grpo_qwen.py`) against GSM8K — zero-shot baseline 86.0%, RL run in progress.
 
+**Architecture ablation — does a state-space model (Mamba) beat a Transformer,
+and when?** Same from-scratch harness, `--arch mamba` vs `--arch modern`, matched
+parameters and matched compute (identical tokens/iter and iters), changing one
+variable at a time. FineWeb-Edu GPT-2 tokens, 3000 iters. Run on a rented RTX 4090
+(RunPod) because the Mamba selective-scan kernels are Linux+CUDA only — see
+`cloud/`. A Mamba block is ~half a Transformer block's parameters, so the match
+bumps Mamba's layer count (6→12 layers at 30M, 12→22 at 124M).
+
+| params | context | asymptote winner | Mamba final Δ vs Transformer |
+|--------|--------:|------------------|-----------------------------:|
+| 30M    | 512  | Transformer     | +0.050 *(Mamba loses)* |
+| 30M    | 2048 | **Mamba**       | −0.036 |
+| 124M   | 2048 | **Mamba**       | −0.048 *(with ~2% fewer params)* |
+
+(val loss; `batch × block` held at 12,288 tokens/iter across the 512↔2048 change,
+so only context length differs.)
+
+Findings:
+1. **Context length is the switch.** At 512 tokens attention wins the asymptote;
+   quadruple the context to 2048 and Mamba wins every checkpoint — two matched
+   runs, one variable, opposite winners.
+2. **Not a toy-scale artifact.** Scaling params 4× (30M → 124M) at 2048 context
+   preserves the Mamba win and slightly *grows* the margin (−0.036 → −0.048),
+   even with Mamba carrying a ~2% parameter disadvantage.
+3. **Mamba's edge is largest early and narrows toward the asymptote** (a
+   sample-efficiency effect — at iter 500, 124M Mamba leads by 0.449). At long
+   context the asymptote gap survives rather than closing; at short context it
+   closes and flips.
+
+The textbook state-space story — SSMs earn their keep as sequences get longer —
+reproduced from scratch at a scale that runs in minutes. Honest limits: val loss
+only (no downstream eval), fixed-compute not asymptotic (undertrained by
+Chinchilla lights), single seed, one dataset. The head-to-head is fair (both
+models see identical conditions); a stronger claim would add a seed sweep, a
+downstream metric, and one more scale point (350M / 4096 context).
+
 ## Quick start (verified working)
 
 ```bash
@@ -103,8 +139,15 @@ python eval_hellaswag.py --ckpt-dir runs/fw-124m --max-examples 1000
 `--arch gpt2` (default) is the faithful 2019 GPT-2: learned positions, LayerNorm,
 GELU. `--arch modern` is the Llama-style stack: rotary positions (RoPE), RMSNorm,
 SwiGLU, zero-init residual projections — same cost per step, reaches better loss;
-use it for new runs. Checkpoints remember their arch, so `sample.py`, `sft.py`,
-and evals work with both.
+use it for new runs. `--arch mamba` swaps attention for a Mamba state-space mixer
+(no positional encoding — the recurrence is order-aware); it needs the
+`mamba-ssm` / `causal-conv1d` CUDA kernels (Linux only — `cloud/install_mamba_wheels.sh`
+is the robust prebuilt-wheel install; `cloud/install_mamba.sh` source-builds but
+fails when the box's nvcc is newer than torch's CUDA), and falls back to a slow
+pure-PyTorch scan
+elsewhere so the file still imports on Windows. Match its params to a Transformer
+with `--n-layer` (a Mamba block is ~half a Transformer block). Checkpoints
+remember their arch, so `sample.py`, `sft.py`, and evals work with all three.
 
 ## Files
 
