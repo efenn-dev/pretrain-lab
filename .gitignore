@@ -5,3 +5,6 @@ logs/
 __pycache__/
 # live cross-session state (lives on disk, not in history)
 dashboard_notes.json
+
+# packed eval kit (binary, regenerable)
+eval-kit.tar.gz

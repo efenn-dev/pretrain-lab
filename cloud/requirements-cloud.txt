@@ -1,0 +1,16 @@
+# Pinned to match the local run so the HF checkpoint resumes cleanly.
+# NOTE: torch is installed separately (needs the CUDA index-url) — see cloud_resume.sh:
+#   pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 \
+#       --index-url https://download.pytorch.org/whl/cu128
+# NOTE: Qwen3.5-4B ALSO needs flash-linear-attention + causal-conv1d (Linux/Triton only) —
+#   not pip-installable cleanly from here; run cloud/install_kernels.sh (both scripts do).
+transformers==5.5.0
+trl==1.7.1
+peft==0.19.1
+bitsandbytes==0.49.2
+datasets==5.0.0
+accelerate==1.13.0
+tokenizers==0.22.2
+safetensors==0.7.0
+sentencepiece==0.2.1
+numpy==2.4.4

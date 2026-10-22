@@ -78,13 +78,18 @@ def main() -> None:
         bf16=True,
         gradient_checkpointing=True,
         report_to="none",
+        ignore_data_skip=True,  # on resume, jump straight to the saved step; don't re-iterate the dataloader (it pegs CPU for many minutes)
         model_init_kwargs={"quantization_config": bnb, "dtype": torch.bfloat16},
     )
     trainer = GRPOTrainer(
         model=args.model, args=cfg, train_dataset=ds,
         reward_funcs=[correctness_reward, format_reward], peft_config=lora,
     )
-    trainer.train()
+    from transformers.trainer_utils import get_last_checkpoint
+    last_ckpt = get_last_checkpoint(str(args.out_dir)) if args.out_dir.exists() else None
+    if last_ckpt:
+        log.info("resuming from checkpoint %s", last_ckpt)
+    trainer.train(resume_from_checkpoint=last_ckpt)
     trainer.save_model(str(args.out_dir))
     log.info("saved adapter to %s", args.out_dir)
 
